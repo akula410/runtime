@@ -24,6 +24,12 @@ type App struct {
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
+
+	// runMu guards runCtx, which is the context active during Run.
+	// Service start operations use runCtx so that service lifetime is bound to
+	// the application lifecycle, not to the caller's (e.g. HTTP request) context.
+	runMu  sync.RWMutex
+	runCtx context.Context
 }
 
 // New creates an App with the given options.
@@ -60,6 +66,16 @@ func (a *App) AddServiceWithPolicy(svc Service, cfg RestartConfig) error {
 
 // Run executes startup tasks, starts services, and blocks until shutdown.
 func (a *App) Run(ctx context.Context) error {
+	// Store the run context so service-start operations use it as the parent.
+	a.runMu.Lock()
+	a.runCtx = ctx
+	a.runMu.Unlock()
+	defer func() {
+		a.runMu.Lock()
+		a.runCtx = nil
+		a.runMu.Unlock()
+	}()
+
 	// PID file
 	var pidFile *process.PIDFile
 	if a.pidPath != "" {
@@ -146,14 +162,32 @@ func (a *App) LoadConfig(ctx context.Context, target any) error {
 // Services returns the underlying Manager for direct access.
 func (a *App) Services() *Manager { return a.manager }
 
+// appRunCtx returns the active run context, or an error if the app is not running.
+func (a *App) appRunCtx() (context.Context, error) {
+	a.runMu.RLock()
+	defer a.runMu.RUnlock()
+	if a.runCtx == nil || a.runCtx.Err() != nil {
+		return nil, fmt.Errorf("runtime: app is not running")
+	}
+	return a.runCtx, nil
+}
+
 // Controller interface implementation
 
 // Shutdown implements Controller. Signals graceful stop.
 func (a *App) Shutdown(ctx context.Context) error { return a.Stop(ctx) }
 
 // Restart implements Controller. Restarts all services.
+// Uses the run context so restarted services remain bound to the app lifecycle.
 func (a *App) Restart(ctx context.Context) error {
-	return a.manager.RestartAll(ctx)
+	runCtx, err := a.appRunCtx()
+	if err != nil {
+		return err
+	}
+	if err := a.manager.StopAll(ctx); err != nil {
+		return fmt.Errorf("runtime: restart all stop: %w", err)
+	}
+	return a.manager.StartAll(runCtx)
 }
 
 // ServiceStatus implements Controller.
@@ -167,8 +201,14 @@ func (a *App) ServiceHealth(ctx context.Context, name string) (HealthStatus, err
 }
 
 // StartService implements Controller.
-func (a *App) StartService(ctx context.Context, name string) error {
-	return a.manager.Start(ctx, name)
+// The service is started with the app's run context so that its lifetime is
+// bound to the application, not to the caller's context (e.g. an HTTP request).
+func (a *App) StartService(_ context.Context, name string) error {
+	runCtx, err := a.appRunCtx()
+	if err != nil {
+		return err
+	}
+	return a.manager.Start(runCtx, name)
 }
 
 // StopService implements Controller.
@@ -177,6 +217,15 @@ func (a *App) StopService(ctx context.Context, name string) error {
 }
 
 // RestartService implements Controller.
+// Stop uses the caller's context (for timeout); Start uses the run context
+// so the restarted service is bound to the application lifecycle.
 func (a *App) RestartService(ctx context.Context, name string) error {
-	return a.manager.Restart(ctx, name)
+	if err := a.manager.Stop(ctx, name); err != nil {
+		return fmt.Errorf("runtime: restart %q stop: %w", name, err)
+	}
+	runCtx, err := a.appRunCtx()
+	if err != nil {
+		return err
+	}
+	return a.manager.Start(runCtx, name)
 }

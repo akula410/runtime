@@ -44,11 +44,17 @@ func (m *Manager) Register(svc Service) error {
 }
 
 // RegisterWithPolicy adds a service with an explicit restart configuration.
-// Returns ErrDuplicateService if the name is already taken.
+// Returns ErrNilService, ErrEmptyName, or ErrDuplicateService on invalid input.
 func (m *Manager) RegisterWithPolicy(svc Service, cfg RestartConfig) error {
+	if svc == nil {
+		return ErrNilService
+	}
+	name := svc.Name()
+	if name == "" {
+		return ErrEmptyName
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	name := svc.Name()
 	if _, exists := m.services[name]; exists {
 		return fmt.Errorf("%w: %q", ErrDuplicateService, name)
 	}

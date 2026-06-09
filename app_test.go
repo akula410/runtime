@@ -113,3 +113,56 @@ func TestAppStatus(t *testing.T) {
 	cancel()
 	<-runDone
 }
+
+func TestStartServiceRequiresRunningApp(t *testing.T) {
+	app, _ := runtime.New()
+	_ = app.AddService(blockingService("svc"))
+
+	// App is not running yet — StartService must return an error.
+	if err := app.StartService(context.Background(), "svc"); err == nil {
+		t.Fatal("expected error when app is not running")
+	}
+}
+
+// TestStartServiceUsesRunContext verifies that a service started via StartService
+// is bound to the app's run context, not to the caller's (e.g. HTTP request) context.
+func TestStartServiceUsesRunContext(t *testing.T) {
+	app, _ := runtime.New(runtime.WithShutdownTimeout(500 * time.Millisecond))
+	_ = app.AddService(blockingService("svc"))
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- app.Run(runCtx) }()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Stop the service so we can re-start it via StartService.
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	if err := app.Services().Stop(stopCtx, "svc"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+
+	// Use a short-lived request context to start the service.
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	if err := app.StartService(reqCtx, "svc"); err != nil {
+		t.Fatalf("StartService: %v", err)
+	}
+	time.Sleep(30 * time.Millisecond)
+
+	// Cancel the request context — the service must remain running.
+	cancelReq()
+	time.Sleep(50 * time.Millisecond)
+
+	hs, err := app.Services().StatusOf(context.Background(), "svc")
+	if err != nil {
+		t.Fatalf("StatusOf: %v", err)
+	}
+	if hs.State == runtime.ServiceStopped || hs.State == runtime.ServiceFailed {
+		t.Errorf("service stopped after request context was cancelled (state=%s) — service was incorrectly bound to request context", hs.State)
+	}
+
+	cancelRun()
+	<-runDone
+}

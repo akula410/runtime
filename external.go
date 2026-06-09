@@ -11,9 +11,11 @@ import (
 )
 
 // ExternalProcessService runs an external command as a managed Service.
-// The process is started by Start and monitored until it exits or the context
-// is cancelled. On cancellation os.Interrupt is sent first; if the process does
-// not exit within KillTimeout it is killed.
+//
+// On Unix-like systems the child process is started in its own process group
+// so that stopping sends signals to the entire group (including grandchildren).
+// On Windows, only the direct child process receives the signal; see the
+// platform notes in the README for limitations.
 type ExternalProcessService struct {
 	name        string
 	prog        string
@@ -64,8 +66,8 @@ func (s *ExternalProcessService) WithStderr(w io.Writer) *ExternalProcessService
 	return s
 }
 
-// WithKillTimeout sets how long to wait after sending Interrupt before killing.
-// Default is 5 seconds.
+// WithKillTimeout sets how long to wait for the process to exit after sending
+// the interrupt signal before sending a hard kill. Default is 5 seconds.
 func (s *ExternalProcessService) WithKillTimeout(d time.Duration) *ExternalProcessService {
 	s.killTimeout = d
 	return s
@@ -75,7 +77,8 @@ func (s *ExternalProcessService) WithKillTimeout(d time.Duration) *ExternalProce
 func (s *ExternalProcessService) Name() string { return s.name }
 
 // Start launches the external process and blocks until it exits or ctx is cancelled.
-// On cancellation it sends os.Interrupt and, if necessary, os.Kill after KillTimeout.
+// On cancellation the process group receives an interrupt signal first; if it
+// does not exit within KillTimeout, a kill signal is sent.
 // Implements Service.
 func (s *ExternalProcessService) Start(ctx context.Context) error {
 	cmd := exec.Command(s.prog, s.args...)
@@ -87,6 +90,9 @@ func (s *ExternalProcessService) Start(ctx context.Context) error {
 	}
 	cmd.Stdout = s.stdout
 	cmd.Stderr = s.stderr
+
+	// Platform-specific: put the process in its own group on Unix.
+	extProcSetup(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("external process %q: start: %w", s.name, err)
@@ -114,25 +120,19 @@ func (s *ExternalProcessService) Start(ctx context.Context) error {
 	}
 }
 
-// interruptAndWait sends Interrupt to the process and waits for it to exit;
-// sends Kill after s.killTimeout if it does not exit in time.
+// interruptAndWait sends an interrupt to the process group and waits;
+// after killTimeout it sends a kill signal.
 func (s *ExternalProcessService) interruptAndWait(cmd *exec.Cmd, waitCh <-chan error) {
-	if cmd.Process != nil {
-		// os.Interrupt may not be supported on all platforms (e.g. Windows
-		// background processes). Ignore the error; Kill will fire after the timeout.
-		_ = cmd.Process.Signal(os.Interrupt)
-	}
+	extProcInterrupt(cmd)
 	select {
 	case <-waitCh:
 	case <-time.After(s.killTimeout):
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
+		extProcKill(cmd)
 		<-waitCh
 	}
 }
 
-// Stop sends Interrupt to the running process, if any.
+// Stop sends an interrupt to the process group, if the process is running.
 // Implements Service.
 func (s *ExternalProcessService) Stop(_ context.Context) error {
 	s.mu.Lock()
@@ -141,7 +141,7 @@ func (s *ExternalProcessService) Stop(_ context.Context) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
-	return cmd.Process.Signal(os.Interrupt)
+	return extProcStop(cmd)
 }
 
 // Health reports whether the process is currently running.

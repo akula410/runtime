@@ -36,3 +36,7 @@ configs/.local/
 __MACOSX/
 .idea/
 .vscode/
+
+# Local Claude Code settings
+settings.local.json
+.claude/settings.local.json

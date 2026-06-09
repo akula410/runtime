@@ -253,7 +253,7 @@ _       = client.Stop(ctx)
 
 ## External process services
 
-`ExternalProcessService` wraps an OS process as a `Service`. It handles start, graceful stop (SIGINT → SIGKILL after timeout), and health reporting.
+`ExternalProcessService` wraps an OS process as a `Service`. It handles start, graceful stop, and health reporting.
 
 ```go
 svc := runtime.NewExternalProcessService("redis", "redis-server", "--port", "6379").
@@ -273,6 +273,23 @@ app.AddServiceWithPolicy(svc, runtime.RestartConfig{
     Delay:       time.Second,
 })
 ```
+
+### Shutdown sequence
+
+On context cancellation (or `app.Stop()`):
+
+1. SIGINT is sent to the **process group** (Unix) or the process (Windows).
+2. If the process does not exit within `KillTimeout`, SIGKILL / `Process.Kill()` is sent.
+3. `Start` returns `nil` (clean stop).
+
+### Platform notes
+
+| Platform | Process group | Child processes |
+|----------|---------------|-----------------|
+| Linux / macOS / Unix | New group via `Setpgid: true`; signals sent with `Kill(-pgid, ...)` | Grandchild processes in the group are also terminated |
+| Windows | No process group support (TODO: Job Objects) | Only the direct child receives the signal; grandchildren may remain |
+
+On Windows, if the managed program spawns children (e.g., `cmd.exe` launching another binary), those children are **not** automatically terminated. Use a program that manages its own shutdown, or implement Windows Job Objects for full subtree control.
 
 ## Graceful shutdown
 

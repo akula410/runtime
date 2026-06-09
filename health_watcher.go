@@ -22,11 +22,16 @@ func NewHealthWatcher(interval, timeout time.Duration) *HealthWatcher {
 }
 
 // Watch runs the polling loop and blocks until ctx is cancelled.
+// An immediate poll is performed before the first ticker interval.
 func (hw *HealthWatcher) Watch(ctx context.Context, m *Manager) {
 	interval := hw.Interval
 	if interval <= 0 {
 		interval = 15 * time.Second
 	}
+
+	// Poll immediately so that Snapshot is available without waiting one full interval.
+	hw.poll(ctx, m)
+
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
 	for {
@@ -53,7 +58,7 @@ func (hw *HealthWatcher) poll(ctx context.Context, m *Manager) {
 }
 
 // Snapshot returns a copy of the most recently polled health statuses.
-// Returns nil if Watch has not yet completed a single poll.
+// Returns nil only if Watch has never been called.
 func (hw *HealthWatcher) Snapshot() []HealthStatus {
 	hw.mu.RLock()
 	defer hw.mu.RUnlock()

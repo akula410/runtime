@@ -51,6 +51,21 @@ func TestManagerRejectsDuplicateNames(t *testing.T) {
 	}
 }
 
+func TestManagerRejectsNilService(t *testing.T) {
+	m := runtime.NewManager()
+	if err := m.Register(nil); !errors.Is(err, runtime.ErrNilService) {
+		t.Fatalf("want ErrNilService, got %v", err)
+	}
+}
+
+func TestManagerRejectsEmptyName(t *testing.T) {
+	m := runtime.NewManager()
+	svc := &mockService{name: ""}
+	if err := m.Register(svc); !errors.Is(err, runtime.ErrEmptyName) {
+		t.Fatalf("want ErrEmptyName, got %v", err)
+	}
+}
+
 func TestManagerUnknownService(t *testing.T) {
 	m := runtime.NewManager()
 	if err := m.Stop(context.Background(), "nope"); !errors.Is(err, runtime.ErrUnknownService) {
