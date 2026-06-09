@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -49,7 +50,8 @@ func (m *Manager) RegisterWithPolicy(svc Service, cfg RestartConfig) error {
 	if svc == nil {
 		return ErrNilService
 	}
-	name := svc.Name()
+
+	name := strings.TrimSpace(svc.Name())
 	if name == "" {
 		return ErrEmptyName
 	}
