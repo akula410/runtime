@@ -12,7 +12,9 @@ func registerHandlers(mux *http.ServeMux, ctrl runtime.Controller, token string)
 	h := &handler{ctrl: ctrl, token: token}
 	mux.HandleFunc("GET /status", h.appStatus)
 	mux.HandleFunc("POST /stop", h.appStop)
+	mux.HandleFunc("POST /restart", h.appRestart)
 	mux.HandleFunc("GET /services/{name}/status", h.serviceStatus)
+	mux.HandleFunc("GET /services/{name}/health", h.serviceHealth)
 	mux.HandleFunc("POST /services/{name}/start", h.serviceStart)
 	mux.HandleFunc("POST /services/{name}/stop", h.serviceStop)
 	mux.HandleFunc("POST /services/{name}/restart", h.serviceRestart)
@@ -53,12 +55,36 @@ func (h *handler) appStop(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopping"})
 }
 
+func (h *handler) appRestart(w http.ResponseWriter, r *http.Request) {
+	if !h.auth(w, r) {
+		return
+	}
+	if err := h.ctrl.Restart(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "restarted"})
+}
+
 func (h *handler) serviceStatus(w http.ResponseWriter, r *http.Request) {
 	if !h.auth(w, r) {
 		return
 	}
 	name := r.PathValue("name")
 	hs, err := h.ctrl.ServiceStatus(r.Context(), name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, hs)
+}
+
+func (h *handler) serviceHealth(w http.ResponseWriter, r *http.Request) {
+	if !h.auth(w, r) {
+		return
+	}
+	name := r.PathValue("name")
+	hs, err := h.ctrl.ServiceHealth(r.Context(), name)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return

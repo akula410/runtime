@@ -4,16 +4,19 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 )
 
-// managedService wraps a Service with lifecycle state tracking.
+// managedService wraps a Service with lifecycle state and restart tracking.
 type managedService struct {
-	svc    Service
-	mu     sync.RWMutex
-	state  ServiceState
-	cancel context.CancelFunc
-	done   chan struct{}
-	err    error
+	svc          Service
+	mu           sync.RWMutex
+	state        ServiceState
+	cancel       context.CancelFunc
+	done         chan struct{}
+	err          error
+	restartCfg   RestartConfig
+	restartCount int
 }
 
 func (ms *managedService) getState() ServiceState {
@@ -31,13 +34,18 @@ type Manager struct {
 
 // NewManager creates a new Manager.
 func NewManager() *Manager {
-	return &Manager{
-		services: make(map[string]*managedService),
-	}
+	return &Manager{services: make(map[string]*managedService)}
 }
 
-// Register adds a service. Returns ErrDuplicateService if the name is already taken.
+// Register adds a service with the default restart policy (RestartNever).
+// Returns ErrDuplicateService if the name is already taken.
 func (m *Manager) Register(svc Service) error {
+	return m.RegisterWithPolicy(svc, RestartConfig{})
+}
+
+// RegisterWithPolicy adds a service with an explicit restart configuration.
+// Returns ErrDuplicateService if the name is already taken.
+func (m *Manager) RegisterWithPolicy(svc Service, cfg RestartConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	name := svc.Name()
@@ -47,9 +55,10 @@ func (m *Manager) Register(svc Service) error {
 	done := make(chan struct{})
 	close(done) // closed so any stale wait returns immediately
 	m.services[name] = &managedService{
-		svc:   svc,
-		state: ServiceStopped,
-		done:  done,
+		svc:        svc,
+		state:      ServiceStopped,
+		done:       done,
+		restartCfg: cfg,
 	}
 	m.order = append(m.order, name)
 	return nil
@@ -76,7 +85,7 @@ func (m *Manager) snapshot() []*managedService {
 	return out
 }
 
-// StartAll starts all registered services concurrently.
+// StartAll starts all stopped or failed services concurrently.
 func (m *Manager) StartAll(ctx context.Context) error {
 	for _, ms := range m.snapshot() {
 		st := ms.getState()
@@ -107,7 +116,15 @@ func (m *Manager) StopAll(ctx context.Context) error {
 	return joinErrors(errs)
 }
 
-// Start starts the named service. Fails if the service is not stopped/failed.
+// RestartAll stops all running services and starts them again.
+func (m *Manager) RestartAll(ctx context.Context) error {
+	if err := m.StopAll(ctx); err != nil {
+		return fmt.Errorf("runtime: restart all stop: %w", err)
+	}
+	return m.StartAll(ctx)
+}
+
+// Start starts the named service. Fails if the service is not stopped or failed.
 func (m *Manager) Start(ctx context.Context, name string) error {
 	ms, err := m.get(name)
 	if err != nil {
@@ -153,7 +170,7 @@ func (m *Manager) Status(ctx context.Context) []HealthStatus {
 	return out
 }
 
-// StatusOf returns the health status of the named service.
+// StatusOf returns the combined manager state and health for the named service.
 func (m *Manager) StatusOf(ctx context.Context, name string) (HealthStatus, error) {
 	ms, err := m.get(name)
 	if err != nil {
@@ -162,11 +179,23 @@ func (m *Manager) StatusOf(ctx context.Context, name string) (HealthStatus, erro
 	return healthOf(ctx, ms), nil
 }
 
+// HealthOf calls Health(ctx) directly on the named service without manager state overlay.
+func (m *Manager) HealthOf(ctx context.Context, name string) (HealthStatus, error) {
+	ms, err := m.get(name)
+	if err != nil {
+		return HealthStatus{}, err
+	}
+	h := ms.svc.Health(ctx)
+	h.Name = ms.svc.Name()
+	return h, nil
+}
+
 func healthOf(ctx context.Context, ms *managedService) HealthStatus {
 	h := ms.svc.Health(ctx)
 	ms.mu.RLock()
 	h.Name = ms.svc.Name()
 	h.State = ms.state
+	h.Restarts = ms.restartCount
 	if ms.err != nil && h.Error == "" {
 		h.Error = ms.err.Error()
 	}
@@ -174,7 +203,7 @@ func healthOf(ctx context.Context, ms *managedService) HealthStatus {
 	return h
 }
 
-// launch starts ms in a goroutine and transitions state Starting → Running → Stopped/Failed.
+// launch starts ms in a goroutine. It loops according to the restart config.
 func (m *Manager) launch(ctx context.Context, ms *managedService) {
 	svcCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -183,28 +212,74 @@ func (m *Manager) launch(ctx context.Context, ms *managedService) {
 	ms.cancel = cancel
 	ms.done = done
 	ms.err = nil
+	ms.restartCount = 0
 	ms.state = ServiceStarting
 	ms.mu.Unlock()
 
 	go func() {
 		defer close(done)
+		defer cancel()
 
-		ms.mu.Lock()
-		if ms.state == ServiceStarting {
-			ms.state = ServiceRunning
+		for {
+			ms.mu.Lock()
+			if ms.state == ServiceStarting {
+				ms.state = ServiceRunning
+			}
+			ms.mu.Unlock()
+
+			err := ms.svc.Start(svcCtx)
+
+			// Context cancelled: clean shutdown requested.
+			if svcCtx.Err() != nil {
+				ms.mu.Lock()
+				ms.state = ServiceStopped
+				ms.mu.Unlock()
+				return
+			}
+
+			ms.mu.RLock()
+			cfg := ms.restartCfg
+			count := ms.restartCount
+			ms.mu.RUnlock()
+
+			var shouldRestart bool
+			switch cfg.Policy {
+			case RestartOnFailure:
+				shouldRestart = err != nil
+			case RestartAlways:
+				shouldRestart = true
+			}
+
+			if shouldRestart && (cfg.MaxRestarts == 0 || count < cfg.MaxRestarts) {
+				ms.mu.Lock()
+				ms.restartCount++
+				ms.err = err
+				ms.state = ServiceStarting
+				ms.mu.Unlock()
+
+				if cfg.Delay > 0 {
+					select {
+					case <-time.After(cfg.Delay):
+					case <-svcCtx.Done():
+						ms.mu.Lock()
+						ms.state = ServiceStopped
+						ms.mu.Unlock()
+						return
+					}
+				}
+				continue
+			}
+
+			ms.mu.Lock()
+			if err != nil {
+				ms.state = ServiceFailed
+				ms.err = err
+			} else {
+				ms.state = ServiceStopped
+			}
+			ms.mu.Unlock()
+			return
 		}
-		ms.mu.Unlock()
-
-		err := ms.svc.Start(svcCtx)
-
-		ms.mu.Lock()
-		if err != nil && svcCtx.Err() == nil {
-			ms.state = ServiceFailed
-			ms.err = err
-		} else {
-			ms.state = ServiceStopped
-		}
-		ms.mu.Unlock()
 	}()
 }
 

@@ -111,19 +111,27 @@ func (s *Server) Addr() string {
 	return s.addr
 }
 
-// requireLoopback returns an error when addr would bind to all network interfaces.
-// Empty host, 0.0.0.0, and :: are rejected.
+// requireLoopback returns an error when addr does not resolve to a loopback interface.
+// Accepted hosts: 127.x.x.x, ::1, and the special hostname "localhost".
+// Any other host — including empty, 0.0.0.0, ::, and external IPs — is rejected.
 func requireLoopback(addr string) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return fmt.Errorf("control: invalid address %q: %w", addr, err)
 	}
 	if host == "" {
-		return fmt.Errorf("control: refusing to bind to all interfaces: specify an explicit loopback address (e.g. 127.0.0.1)")
+		return fmt.Errorf("control: address %q does not specify a host: use a loopback address (e.g. 127.0.0.1)", addr)
+	}
+	// "localhost" is a well-known loopback hostname.
+	if host == "localhost" {
+		return nil
 	}
 	ip := net.ParseIP(host)
-	if ip != nil && ip.IsUnspecified() {
-		return fmt.Errorf("control: refusing to bind to all interfaces (%q): use a loopback address (e.g. 127.0.0.1)", host)
+	if ip == nil {
+		return fmt.Errorf("control: address host %q is not a valid IP: use a loopback address (e.g. 127.0.0.1)", host)
+	}
+	if !ip.IsLoopback() {
+		return fmt.Errorf("control: address %q is not a loopback address: the control server must not be exposed on a network interface", host)
 	}
 	return nil
 }

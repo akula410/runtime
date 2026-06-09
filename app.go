@@ -11,7 +11,7 @@ import (
 	"github.com/akula410/runtime/shutdown"
 )
 
-// App coordinates startup tasks, services, and graceful shutdown.
+// App coordinates startup tasks, services, health watching, and graceful shutdown.
 type App struct {
 	manager         *Manager
 	tasks           []StartupTask
@@ -20,6 +20,7 @@ type App struct {
 	configLoader    config.Loader
 	shutdownTimeout time.Duration
 	pidPath         string
+	healthWatcher   *HealthWatcher
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
@@ -52,6 +53,11 @@ func (a *App) AddService(svc Service) error {
 	return a.manager.Register(svc)
 }
 
+// AddServiceWithPolicy registers a service with an explicit restart policy.
+func (a *App) AddServiceWithPolicy(svc Service, cfg RestartConfig) error {
+	return a.manager.RegisterWithPolicy(svc, cfg)
+}
+
 // Run executes startup tasks, starts services, and blocks until shutdown.
 func (a *App) Run(ctx context.Context) error {
 	// PID file
@@ -80,6 +86,14 @@ func (a *App) Run(ctx context.Context) error {
 		return fmt.Errorf("runtime: start services: %w", err)
 	}
 
+	// Start health watcher
+	var hwCancel context.CancelFunc
+	if a.healthWatcher != nil {
+		hwCtx, cancel := context.WithCancel(ctx)
+		hwCancel = cancel
+		go a.healthWatcher.Watch(hwCtx, a.manager)
+	}
+
 	// Wait for OS signal or explicit Stop call
 	sigCtx, cancelSig := shutdown.NotifyContext(ctx)
 	defer cancelSig()
@@ -88,6 +102,11 @@ func (a *App) Run(ctx context.Context) error {
 	case <-sigCtx.Done():
 	case <-a.stopCh:
 	case <-ctx.Done():
+	}
+
+	// Stop health watcher before stopping services
+	if hwCancel != nil {
+		hwCancel()
 	}
 
 	// Graceful shutdown
@@ -132,9 +151,19 @@ func (a *App) Services() *Manager { return a.manager }
 // Shutdown implements Controller. Signals graceful stop.
 func (a *App) Shutdown(ctx context.Context) error { return a.Stop(ctx) }
 
+// Restart implements Controller. Restarts all services.
+func (a *App) Restart(ctx context.Context) error {
+	return a.manager.RestartAll(ctx)
+}
+
 // ServiceStatus implements Controller.
 func (a *App) ServiceStatus(ctx context.Context, name string) (HealthStatus, error) {
 	return a.manager.StatusOf(ctx, name)
+}
+
+// ServiceHealth implements Controller. Returns the raw Health() result from the service.
+func (a *App) ServiceHealth(ctx context.Context, name string) (HealthStatus, error) {
+	return a.manager.HealthOf(ctx, name)
 }
 
 // StartService implements Controller.

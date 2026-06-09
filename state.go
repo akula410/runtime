@@ -13,10 +13,11 @@ const (
 
 // HealthStatus holds the health information for a single service.
 type HealthStatus struct {
-	Name    string       `json:"name"`
-	State   ServiceState `json:"state"`
-	Message string       `json:"message,omitempty"`
-	Error   string       `json:"error,omitempty"`
+	Name     string       `json:"name"`
+	State    ServiceState `json:"state"`
+	Message  string       `json:"message,omitempty"`
+	Error    string       `json:"error,omitempty"`
+	Restarts int          `json:"restarts,omitempty"`
 }
 
 // AppStatus holds the overall application health status.

@@ -4,6 +4,9 @@
 *.dll
 *.so
 *.dylib
+bin/
+dist/
+build/
 
 # Test artifacts
 *.test
@@ -15,7 +18,7 @@ profile.cov
 # Runtime files produced by the package itself
 *.pid
 *.lock
-runtime/
+tmp/
 
 # Go workspace
 go.work
@@ -24,7 +27,12 @@ go.work.sum
 # Environment secrets
 .env
 
+# Local config overrides
+.local/
+configs/.local/
+
 # OS / editor
 .DS_Store
+__MACOSX/
 .idea/
 .vscode/

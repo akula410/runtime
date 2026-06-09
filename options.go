@@ -36,3 +36,8 @@ func WithShutdownTimeout(d time.Duration) Option {
 func WithPIDFile(path string) Option {
 	return func(a *App) { a.pidPath = path }
 }
+
+// WithHealthWatcher registers a HealthWatcher that polls services while Run is active.
+func WithHealthWatcher(hw *HealthWatcher) Option {
+	return func(a *App) { a.healthWatcher = hw }
+}

@@ -1,6 +1,6 @@
 # runtime
 
-`github.com/akula410/runtime` — a Go package for managing application lifecycle: configuration loading, startup tasks, long-running services, health tracking, graceful shutdown, and a local HTTP control API.
+`github.com/akula410/runtime` — a Go package for managing application lifecycle: configuration loading, startup tasks, long-running services, health tracking, restart policies, graceful shutdown, and a local HTTP control API.
 
 ## When to use
 
@@ -9,6 +9,7 @@ Use this package when your application:
 - needs deterministic startup order with dependency checks or migrations
 - requires graceful shutdown on SIGINT/SIGTERM
 - should be controllable from a separate CLI process without restart
+- needs automatic service restart on failure
 
 ## Installation
 
@@ -164,6 +165,56 @@ type Loader interface {
 }
 ```
 
+## Restart policies
+
+Services can be automatically restarted when they exit. Register a service with a `RestartConfig`:
+
+```go
+app.AddServiceWithPolicy(svc, runtime.RestartConfig{
+    Policy:      runtime.RestartOnFailure,
+    MaxRestarts: 5,
+    Delay:       500 * time.Millisecond,
+})
+```
+
+### Policies
+
+| Policy | Behaviour |
+|--------|-----------|
+| `RestartNever` | No automatic restart (default) |
+| `RestartOnFailure` | Restart when `Start` returns a non-nil error |
+| `RestartAlways` | Restart whenever `Start` exits, success or failure |
+
+### Options
+
+- `MaxRestarts` — maximum number of automatic restarts; `0` means unlimited
+- `Delay` — pause between restart attempts
+
+When `MaxRestarts` is exhausted the service enters `failed` state and stops restarting. The restart count is exposed in `HealthStatus.Restarts`.
+
+## Health watcher
+
+`HealthWatcher` polls `Health()` on all services at a configurable interval and caches the results. Use it for background monitoring without blocking the status endpoint.
+
+```go
+hw := runtime.NewHealthWatcher(
+    15 * time.Second, // poll interval
+    5 * time.Second,  // per-poll timeout
+)
+
+app, _ := runtime.New(
+    runtime.WithHealthWatcher(hw),
+)
+
+// Read the latest snapshot from anywhere.
+snap := hw.Snapshot()
+for _, h := range snap {
+    fmt.Printf("%s: %s — %s\n", h.Name, h.State, h.Message)
+}
+```
+
+The watcher starts automatically when `app.Run` begins and stops before services are shut down.
+
 ## Control server / client
 
 The control server exposes HTTP endpoints on `127.0.0.1` for managing a running process. Register it as a service:
@@ -181,7 +232,9 @@ app.AddService(ctrlSrv)
 |--------|------|-------------|
 | GET | `/status` | App + all services health |
 | POST | `/stop` | Graceful app shutdown |
-| GET | `/services/{name}/status` | Single service health |
+| POST | `/restart` | Restart all services |
+| GET | `/services/{name}/status` | Service state + health |
+| GET | `/services/{name}/health` | Raw health check from the service |
 | POST | `/services/{name}/start` | Start a service |
 | POST | `/services/{name}/stop` | Stop a service |
 | POST | `/services/{name}/restart` | Restart a service |
@@ -191,19 +244,46 @@ app.AddService(ctrlSrv)
 ```go
 client := control.NewClient("http://127.0.0.1:7070", "optional-token")
 
-st, _ := client.Status(ctx)
-_ = client.RestartService(ctx, "worker")
-_ = client.Stop(ctx)
+st, _  := client.Status(ctx)
+_       = client.Restart(ctx)
+_       = client.RestartService(ctx, "worker")
+hs, _  := client.ServiceHealth(ctx, "worker")
+_       = client.Stop(ctx)
+```
+
+## External process services
+
+`ExternalProcessService` wraps an OS process as a `Service`. It handles start, graceful stop (SIGINT → SIGKILL after timeout), and health reporting.
+
+```go
+svc := runtime.NewExternalProcessService("redis", "redis-server", "--port", "6379").
+    WithKillTimeout(3 * time.Second).
+    WithStdout(os.Stdout).
+    WithStderr(os.Stderr)
+
+app.AddService(svc)
+```
+
+Combine with restart policies for automatic recovery:
+
+```go
+app.AddServiceWithPolicy(svc, runtime.RestartConfig{
+    Policy:      runtime.RestartOnFailure,
+    MaxRestarts: 10,
+    Delay:       time.Second,
+})
 ```
 
 ## Graceful shutdown
 
 `Run` listens for SIGINT and SIGTERM (on Linux/macOS/Unix; `os.Interrupt` on Windows). On signal or `app.Stop()`:
 
-1. All services receive a context cancellation.
-2. `svc.Stop(ctx)` is called concurrently on each service.
-3. The shutdown context has the configured timeout (default 30 s).
-4. `Run` returns after all services exit or the timeout expires.
+1. Health watcher stops.
+2. All services receive a context cancellation.
+3. `svc.Stop(ctx)` is called concurrently on each service.
+4. The shutdown context has the configured timeout (default 30 s).
+5. `Run` returns after all services exit or the timeout expires.
+6. PID file is removed (if configured).
 
 Configure the timeout:
 
@@ -216,10 +296,13 @@ runtime.WithShutdownTimeout(10 * time.Second)
 Prevents duplicate instances:
 
 ```go
-runtime.WithPIDFile("runtime/app.pid")
+runtime.WithPIDFile("/var/run/myapp.pid")
 ```
 
-The file is created on `Run` and removed on clean exit. An existing PID file causes `Run` to return an error immediately.
+Behaviour:
+- Created on `Run` start; removed on clean exit.
+- If the file exists and the stored process is alive, `Run` returns an error.
+- If the file is stale (process gone) or corrupted, it is removed and recreated automatically.
 
 ## Platform compatibility
 
@@ -233,11 +316,12 @@ Platform-specific code uses build tags (`!windows` / `windows`) in `shutdown/` a
 ## Security notes
 
 - The control server binds to `127.0.0.1` by default. **Never bind to `0.0.0.0`** without additional network-level protection (firewall, VPN, mTLS).
+- Accepted loopback addresses: `127.0.0.1`, `::1`, and `localhost`. Any other host is rejected at startup.
 - Set a non-empty token to enable bearer-token authentication:
   ```go
   control.NewServer("127.0.0.1:7070", app, "my-secret")
   ```
-- Tokens are checked with a direct string comparison — do not log token values.
+- Tokens are checked with direct string comparison — do not log token values.
 - The control API can stop or restart services; treat it with the same care as an admin endpoint.
 
 ## Examples
@@ -246,23 +330,10 @@ Platform-specific code uses build tags (`!windows` / `windows`) in `shutdown/` a
 - [`examples/http_tcp`](examples/http_tcp/main.go) — HTTP server + TCP echo server
 - [`examples/control`](examples/control/main.go) — control server + client
 - [`examples/config`](examples/config/main.go) — per-environment config loading
-
-## Roadmap
-
-### v0.2.0
-
-- **HealthWatcher** — background goroutine that calls `svc.Health()` on a configurable interval and caches results; reports degraded services without blocking the status endpoint.
-  ```go
-  type HealthWatcher struct {
-      Interval time.Duration
-      Timeout  time.Duration
-  }
-  func (w *HealthWatcher) Watch(ctx context.Context, m *Manager)
-  func (w *HealthWatcher) Snapshot() []HealthStatus
-  ```
-- **Restart policies** — automatic restart on failure (max retries, back-off).
-- **Unix socket transport** for the control API as an alternative to TCP.
+- [`examples/health_watcher`](examples/health_watcher/main.go) — background health polling
+- [`examples/restart_policy`](examples/restart_policy/main.go) — automatic restart on failure
+- [`examples/external_process`](examples/external_process/main.go) — managing an external OS process
 
 ## API stability
 
-The package is **v0.1 / pre-1.0**. Public interfaces (`StartupTask`, `Service`, `Controller`) are stable. The `Manager` and `App` structs may gain new methods in minor versions.
+The package is **v0.1 / pre-1.0**. Public interfaces (`StartupTask`, `Service`, `Controller`) are stable. `Manager` and `App` may gain new methods in minor versions.

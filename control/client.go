@@ -34,15 +34,26 @@ func (c *Client) Status(ctx context.Context) (runtime.AppStatus, error) {
 	return out, c.get(ctx, "/status", &out)
 }
 
-// Stop requests the application to shut down.
+// Stop requests the application to shut down gracefully.
 func (c *Client) Stop(ctx context.Context) error {
 	return c.post(ctx, "/stop", nil)
 }
 
-// ServiceStatus returns the status of a named service.
+// Restart requests the application to restart all services.
+func (c *Client) Restart(ctx context.Context) error {
+	return c.post(ctx, "/restart", nil)
+}
+
+// ServiceStatus returns the manager-tracked status of a named service.
 func (c *Client) ServiceStatus(ctx context.Context, name string) (runtime.HealthStatus, error) {
 	var out runtime.HealthStatus
 	return out, c.get(ctx, "/services/"+name+"/status", &out)
+}
+
+// ServiceHealth returns the raw health check result of a named service.
+func (c *Client) ServiceHealth(ctx context.Context, name string) (runtime.HealthStatus, error) {
+	var out runtime.HealthStatus
+	return out, c.get(ctx, "/services/"+name+"/health", &out)
 }
 
 // StartService starts the named service.
