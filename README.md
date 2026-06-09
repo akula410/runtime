@@ -223,10 +223,10 @@ The file is created on `Run` and removed on clean exit. An existing PID file cau
 
 ## Platform compatibility
 
-| Platform | Signals | PID check |
-|----------|---------|-----------|
-| Linux / macOS / Unix | SIGINT, SIGTERM | `kill -0` via `syscall.Signal(0)` |
-| Windows | `os.Interrupt` | `os.FindProcess` |
+| Platform | Signals | PID existence check |
+|----------|---------|---------------------|
+| Linux / macOS / Unix | SIGINT, SIGTERM | `syscall.Signal(0)` (kill -0) |
+| Windows | `os.Interrupt` | `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` |
 
 Platform-specific code uses build tags (`!windows` / `windows`) in `shutdown/` and `process/`.
 
@@ -247,6 +247,22 @@ Platform-specific code uses build tags (`!windows` / `windows`) in `shutdown/` a
 - [`examples/control`](examples/control/main.go) — control server + client
 - [`examples/config`](examples/config/main.go) — per-environment config loading
 
+## Roadmap
+
+### v0.2.0
+
+- **HealthWatcher** — background goroutine that calls `svc.Health()` on a configurable interval and caches results; reports degraded services without blocking the status endpoint.
+  ```go
+  type HealthWatcher struct {
+      Interval time.Duration
+      Timeout  time.Duration
+  }
+  func (w *HealthWatcher) Watch(ctx context.Context, m *Manager)
+  func (w *HealthWatcher) Snapshot() []HealthStatus
+  ```
+- **Restart policies** — automatic restart on failure (max retries, back-off).
+- **Unix socket transport** for the control API as an alternative to TCP.
+
 ## API stability
 
-The package is **pre-1.0**. Public interfaces (`StartupTask`, `Service`, `Controller`) are stable. The `Manager` and `App` structs may gain new methods in minor versions.
+The package is **v0.1 / pre-1.0**. Public interfaces (`StartupTask`, `Service`, `Controller`) are stable. The `Manager` and `App` structs may gain new methods in minor versions.

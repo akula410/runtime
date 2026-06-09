@@ -29,8 +29,8 @@ type Server struct {
 // addr is the TCP address to listen on (default "127.0.0.1:7070").
 // token is the optional bearer token for authentication (empty = no auth).
 //
-// Security: addr must be a loopback address. Passing a non-loopback address
-// risks exposing management operations to the network.
+// Security: addr must resolve to a loopback interface. Attempts to bind to
+// all interfaces (0.0.0.0, ::, or empty host) are rejected in Start.
 func NewServer(addr string, ctrl runtime.Controller, token string) *Server {
 	if addr == "" {
 		addr = defaultAddr
@@ -45,9 +45,14 @@ func NewServer(addr string, ctrl runtime.Controller, token string) *Server {
 // Name implements runtime.Service.
 func (s *Server) Name() string { return "control-server" }
 
-// Start binds the listener and serves HTTP until ctx is cancelled.
+// Start validates the bind address, then serves HTTP until ctx is cancelled.
+// Returns an error if the address would bind to all interfaces.
 // Implements runtime.Service.
 func (s *Server) Start(ctx context.Context) error {
+	if err := requireLoopback(s.addr); err != nil {
+		return err
+	}
+
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
 		return fmt.Errorf("control: listen %s: %w", s.addr, err)
@@ -104,4 +109,21 @@ func (s *Server) Addr() string {
 		return s.listen.Addr().String()
 	}
 	return s.addr
+}
+
+// requireLoopback returns an error when addr would bind to all network interfaces.
+// Empty host, 0.0.0.0, and :: are rejected.
+func requireLoopback(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("control: invalid address %q: %w", addr, err)
+	}
+	if host == "" {
+		return fmt.Errorf("control: refusing to bind to all interfaces: specify an explicit loopback address (e.g. 127.0.0.1)")
+	}
+	ip := net.ParseIP(host)
+	if ip != nil && ip.IsUnspecified() {
+		return fmt.Errorf("control: refusing to bind to all interfaces (%q): use a loopback address (e.g. 127.0.0.1)", host)
+	}
+	return nil
 }

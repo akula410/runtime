@@ -189,3 +189,32 @@ func TestControlServerTokenAuth(t *testing.T) {
 		t.Fatalf("auth with correct token failed: %v", err)
 	}
 }
+
+func TestControlServerRejectsAllInterfaces(t *testing.T) {
+	ctrl := &fakeController{}
+	cases := []string{"0.0.0.0:9999", ":9999", "[::]:9999"}
+	for _, addr := range cases {
+		srv := control.NewServer(addr, ctrl, "")
+		err := srv.Start(context.Background())
+		if err == nil {
+			t.Errorf("addr %q: expected error, got nil", addr)
+		}
+	}
+}
+
+func TestControlServerLoopbackAllowed(t *testing.T) {
+	ctrl := &fakeController{}
+	srv := control.NewServer("127.0.0.1:0", ctrl, "")
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() { done <- srv.Start(ctx) }()
+
+	// Give it a moment to bind, then cancel.
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+
+	if err := <-done; err != nil {
+		t.Fatalf("loopback bind should succeed: %v", err)
+	}
+}
